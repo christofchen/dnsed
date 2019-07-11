@@ -1,22 +1,5 @@
 /*
-Binary dns_reverse_proxy is a DNS reverse proxy to route queries to DNS servers.
-
-To illustrate, imagine an HTTP reverse proxy but for DNS.
-It listens on both TCP/UDP IPv4/IPv6 on specified port.
-Since the upstream servers will not see the real client IPs but the proxy,
-you can specify a list of IPs allowed to transfer (AXFR/IXFR).
-
-Example usage:
-        $ go run dns_reverse_proxy.go -address :53 \
-                -default 8.8.8.8:53 \
-                -route .example.com.=8.8.4.4:53 \
-                -route .example2.com.=8.8.4.4:53,1.1.1.1:53 \
-                -allow-transfer 1.2.3.4,::1
-
-A query for example.net or example.com will go to 8.8.8.8:53, the default.
-However, a query for subdomain.example.com will go to 8.8.4.4:53. -default
-is optional - if it is not given then the server will return a failure for
-queries for domains where a route has not been given.
+Answer rewriting DNS Proxy
 */
 package main
 
