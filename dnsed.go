@@ -1,23 +1,6 @@
 /*
-Binary dns_reverse_proxy is a DNS reverse proxy to route queries to DNS servers.
 
-To illustrate, imagine an HTTP reverse proxy but for DNS.
-It listens on both TCP/UDP IPv4/IPv6 on specified port.
-Since the upstream servers will not see the real client IPs but the proxy,
-you can specify a list of IPs allowed to transfer (AXFR/IXFR).
-
-Example usage:
-        $ go run dns_reverse_proxy.go -address :53 \
-                -default 8.8.8.8:53 \
-                -route .example.com.=8.8.4.4:53 \
-                -route .example2.com.=8.8.4.4:53,1.1.1.1:53 \
-                -allow-transfer 1.2.3.4,::1
-
-A query for example.net or example.com will go to 8.8.8.8:53, the default.
-However, a query for subdomain.example.com will go to 8.8.4.4:53. -default
-is optional - if it is not given then the server will return a failure for
-queries for domains where a route has not been given.
-*/
+ */
 package main
 
 import (
@@ -25,13 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/miekg/dns"
 )
@@ -48,6 +29,7 @@ func (i *flagStringList) Set(value string) error {
 }
 
 var (
+	verbose = flag.Bool("verbose", false, "verbose output")
 	address = flag.String("address", ":53", "Address to listen to (TCP and UDP)")
 
 	uplink = flag.String("uplink", "", "host:port of uplink to send the queries")
@@ -55,8 +37,8 @@ var (
 	ipfile = flag.String("ipfile", "", "file with IP IP mappings to replace")
 	ipmap  map[string]string
 
-	namefile = flag.String("namefile", "", "file with named 'NAME TTL IN A IP' names to replace")
-	namemap  map[string]string
+	namefile = flag.String("namefile", "", "zonefile with named 'NAME TTL IN A IP' names to replace")
+	namemap  map[string][]dns.RR
 )
 
 func check(err error, msg string) {
@@ -67,7 +49,7 @@ func check(err error, msg string) {
 }
 
 func init() {
-	rand.Seed(time.Now().Unix())
+	//rand.Seed(time.Now().Unix())
 }
 
 func main() {
@@ -93,30 +75,32 @@ func main() {
 			nn++
 		}
 	}
-	fmt.Println("read", nn, "ip mappings")
-
+	log.Println("read", nn, "ip mappings")
 	file.Close()
 
 	// Read the translation list NAME -> IP
+	// Format: zone file...
 	file, err = os.Open(*namefile)
 	check(err, "can't read namefile:")
 
-	scanner = bufio.NewScanner(file)
-	scanner.Split(bufio.ScanLines)
-	namemap = make(map[string]string)
+	namemap = make(map[string][]dns.RR)
 	nn = 0
-	for scanner.Scan() {
-		words := strings.Fields(scanner.Text())
-		if len(words) > 4 {
-			if words[0][0] == '#' || words[0][0] == ';' {
-				continue
-			}
-			namemap[words[0]] = words[4]
-			//fmt.Println(words[0], words[1])
+
+	zp := dns.NewZoneParser(file, "", "")
+
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		if _, ok := rr.(*dns.A); ok {
+			label := string(rr.Header().Name)
+			namemap[label] = append(namemap[label], rr)
 			nn++
 		}
 	}
-	fmt.Println("read", nn, "name mappings")
+
+	if err := zp.Err(); err != nil {
+		log.Println(err)
+	}
+
+	log.Println("read", nn, "name mappings")
 
 	file.Close()
 
@@ -177,29 +161,51 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	// rewrite IPs here...
-	//fmt.Printf("%+v\n", resp)
-
+	// rewrite based on the IP
 	for _, rr := range resp.Answer {
-		//fmt.Printf("%d %+v\n", i, rr)
 		if _, ok := rr.(*dns.A); ok {
 			// Rewrite the IP in the Answer section
-			// try the ipmap first
 			ip := string(rr.(*dns.A).A.String())
-			//lookup := string(ip.To16())
 			replace := ipmap[ip]
 			if replace != "" {
 				fmt.Printf("IP based rewrite %+v to %+v\n", rr, replace)
 				rr.(*dns.A).A = net.ParseIP(replace)
 			}
-			// try to rewrite based on the Name
+		}
+	}
+
+	// try to rewrite based on the Name
+
+	var newanswer []dns.RR
+	skipover := make(map[string]int)
+
+	doreplace := false
+	for _, rr := range resp.Answer {
+		if _, ok := rr.(*dns.A); ok {
 			name := string(rr.Header().Name)
-			replace = namemap[name]
-			if replace != "" {
-				fmt.Printf("name based rewrite %+v to %+v\n", rr, replace)
-				rr.(*dns.A).A = net.ParseIP(replace)
+
+			if _, ok := skipover[name]; !ok {
+				// only if NOT processed this "label A" already
+				replacerr := namemap[name]
+
+				for _, rrr := range replacerr {
+					if _, ok := rrr.(*dns.A); ok {
+						log.Printf("name based rewrite %+v to %+v\n", rr, rrr)
+						newanswer = append(newanswer, rrr)
+						doreplace = true
+						skipover[name] = 1
+					}
+				}
 			}
 
+		} else {
+			newanswer = append(newanswer, rr)
 		}
+
+	}
+	if doreplace {
+		resp.Answer = newanswer
+		//log.Printf("debug doreplace  %+v\n", resp.Answer)
 	}
 
 	w.WriteMsg(resp)
