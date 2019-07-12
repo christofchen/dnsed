@@ -1,6 +1,6 @@
 /*
-
- */
+Answer rewriting DNS Proxy
+*/
 package main
 
 import (
