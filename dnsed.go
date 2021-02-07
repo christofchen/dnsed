@@ -58,66 +58,72 @@ func main() {
 	fmt.Println("dnsed V1.2 - christof@chen.de")
 	fmt.Println("rewrite DNS responses based on name/ip mappings")
 	// Read the translation list IP -> IP
-	file, err := os.Open(*ipfile)
-	check(err, "can't read ipfile:")
 
-	scanner := bufio.NewScanner(file)
-	scanner.Split(bufio.ScanLines)
+	if *ipfile != "" {
 
-	ipmap = make([]map[string]string, 4)
-	for i := 0; i < 4; i++ {
-		ipmap[i] = make(map[string]string)
-		//ipmapToCheck[i] = 0
-	}
-	nn := 0
-	for scanner.Scan() {
-		words := strings.Fields(scanner.Text())
-		if len(words) > 1 {
-			if words[0][0] == '#' || words[0][0] == ';' {
-				continue
-			}
+		file, err := os.Open(*ipfile)
+		check(err, "can't read ipfile:")
 
-			dots := strings.Count(words[0], ".")
-			if dots != strings.Count(words[1], ".") {
-				log.Printf("skip malformed IP rule %+v to %+v\n", words[0], words[1])
-				continue
-			}
-			ipmap[dots][words[0]] = words[1]
-			ipmapToCheck[dots] = 1
-			nn++
+		scanner := bufio.NewScanner(file)
+		scanner.Split(bufio.ScanLines)
+
+		ipmap = make([]map[string]string, 4)
+		for i := 0; i < 4; i++ {
+			ipmap[i] = make(map[string]string)
+			//ipmapToCheck[i] = 0
 		}
-	}
-	log.Println("read", nn, "ip mappings")
-	file.Close()
+		nn := 0
+		for scanner.Scan() {
+			words := strings.Fields(scanner.Text())
+			if len(words) > 1 {
+				if words[0][0] == '#' || words[0][0] == ';' {
+					continue
+				}
 
+				dots := strings.Count(words[0], ".")
+				if dots != strings.Count(words[1], ".") {
+					log.Printf("skip malformed IP rule %+v to %+v\n", words[0], words[1])
+					continue
+				}
+				ipmap[dots][words[0]] = words[1]
+				ipmapToCheck[dots] = 1
+				nn++
+			}
+		}
+		log.Printf("read %+v IP mappings from %+v\n", nn, *ipfile)
+		file.Close()
+	}
 	// Read the translation list NAME -> IP
 	// Format: zone file...
-	file, err = os.Open(*namefile)
-	check(err, "can't read namefile:")
+	if *namefile != "" {
+		file, err := os.Open(*namefile)
+		check(err, "can't read namefile:")
 
-	namemap = make(map[string][]dns.RR)
-	nn = 0
+		namemap = make(map[string][]dns.RR)
+		nn := 0
 
-	zp := dns.NewZoneParser(file, "", "")
+		zp := dns.NewZoneParser(file, "", "")
 
-	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		//if _, ok := rr.(*dns.A); ok {
-		label := string(rr.Header().Name)
-		namemap[label] = append(namemap[label], rr)
-		nn++
-		//}
+		for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+			//if _, ok := rr.(*dns.A); ok {
+			label := string(rr.Header().Name)
+			namemap[label] = append(namemap[label], rr)
+			nn++
+			//}
+		}
+
+		if err := zp.Err(); err != nil {
+			log.Println(err)
+		}
+
+		log.Printf("read %+v name mappings from %+v\n", nn, *namefile)
+
+		file.Close()
 	}
-
-	if err := zp.Err(); err != nil {
-		log.Println(err)
-	}
-
-	log.Println("read", nn, "name mappings")
-
-	file.Close()
-
 	udpServer := &dns.Server{Addr: *address, Net: "udp"}
 	tcpServer := &dns.Server{Addr: *address, Net: "tcp"}
+
+	log.Printf("server ready\n")
 
 	dns.HandleFunc(".", myhandler)
 
