@@ -78,10 +78,12 @@ func main() {
 			}
 
 			dots := strings.Count(words[0], ".")
-
+			if dots != strings.Count(words[1], ".") {
+				log.Printf("skip malformed IP rule %+v to %+v\n", words[0], words[1])
+				continue
+			}
 			ipmap[dots][words[0]] = words[1]
 			ipmapToCheck[dots] = 1
-			fmt.Println("dots:", dots, words[0], words[1], ipmapToCheck[dots])
 			nn++
 		}
 	}
