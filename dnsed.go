@@ -34,8 +34,9 @@ var (
 
 	uplink = flag.String("uplink", "", "host:port of uplink to send the queries")
 
-	ipfile = flag.String("ipfile", "", "file with IP IP mappings to replace")
-	ipmap  map[string]string
+	ipfile       = flag.String("ipfile", "", "file with IP IP mappings to replace\nmay contain only partial mappings like 10 11 or 192.168 10.168")
+	ipmap        []map[string]string
+	ipmapToCheck = [4]int{0, 0, 0, 0}
 
 	namefile = flag.String("namefile", "", "zonefile with named 'NAME TTL IN A IP' names to replace")
 	namemap  map[string][]dns.RR
@@ -54,7 +55,7 @@ func init() {
 
 func main() {
 	flag.Parse()
-	fmt.Println("dnsed V1.0 - christof@chen.de")
+	fmt.Println("dnsed V1.2 - christof@chen.de")
 	fmt.Println("rewrite DNS responses based on name/ip mappings")
 	// Read the translation list IP -> IP
 	file, err := os.Open(*ipfile)
@@ -62,7 +63,12 @@ func main() {
 
 	scanner := bufio.NewScanner(file)
 	scanner.Split(bufio.ScanLines)
-	ipmap = make(map[string]string)
+
+	ipmap = make([]map[string]string, 4)
+	for i := 0; i < 4; i++ {
+		ipmap[i] = make(map[string]string)
+		//ipmapToCheck[i] = 0
+	}
 	nn := 0
 	for scanner.Scan() {
 		words := strings.Fields(scanner.Text())
@@ -70,8 +76,12 @@ func main() {
 			if words[0][0] == '#' || words[0][0] == ';' {
 				continue
 			}
-			ipmap[words[0]] = words[1]
-			//fmt.Println(words[0], words[1])
+
+			dots := strings.Count(words[0], ".")
+
+			ipmap[dots][words[0]] = words[1]
+			ipmapToCheck[dots] = 1
+			fmt.Println("dots:", dots, words[0], words[1], ipmapToCheck[dots])
 			nn++
 		}
 	}
@@ -89,11 +99,11 @@ func main() {
 	zp := dns.NewZoneParser(file, "", "")
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
-		if _, ok := rr.(*dns.A); ok {
-			label := string(rr.Header().Name)
-			namemap[label] = append(namemap[label], rr)
-			nn++
-		}
+		//if _, ok := rr.(*dns.A); ok {
+		label := string(rr.Header().Name)
+		namemap[label] = append(namemap[label], rr)
+		nn++
+		//}
 	}
 
 	if err := zp.Err(); err != nil {
@@ -160,27 +170,43 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	// rewrite IPs here...
 	// rewrite based on the IP
+	// 1:1 inline replace of the IP(s) in the packet
+	// check most specific first
+	var replace string = ""
 	for _, rr := range resp.Answer {
 		if _, ok := rr.(*dns.A); ok {
 			// Rewrite the IP in the Answer section
 			ip := string(rr.(*dns.A).A.String())
-			replace := ipmap[ip]
-			if replace != "" {
-				fmt.Printf("IP based rewrite %+v to %+v\n", rr, replace)
-				rr.(*dns.A).A = net.ParseIP(replace)
+			var octets []string
+			octets = strings.Split(ip, ".")
+			//fmt.Printf("DEBUG check IP %+v \n", octets)
+			for ii := 3; ii > -1; ii-- {
+				//fmt.Printf("DEBUG ipmapToCheck[%+v] %+v \n", ii, ipmapToCheck[ii])
+				if ipmapToCheck[ii] == 1 {
+					var checkip = strings.Join(octets[0:ii+1], ".")
+					//fmt.Printf("DEBUG check IP match %+v in run %+v as %+v\n", ip, ii, checkip)
+					replace = ipmap[ii][checkip]
+					if replace != "" {
+						replace = replace + "." + strings.Join(octets[ii+1:4], ".")
+						log.Printf("IP based rewrite %+v to %+v\n", rr, replace)
+						rr.(*dns.A).A = net.ParseIP(replace)
+						break
+					}
+				}
 			}
 		}
 	}
 
 	// try to rewrite based on the Name
+	// remove the original answer section, replace with the new answer
 
 	var newanswer []dns.RR
 	skipover := make(map[string]int)
 
 	doreplace := false
 	for _, rr := range resp.Answer {
+		// rewrite A records only :-)
 		if _, ok := rr.(*dns.A); ok {
 			name := string(rr.Header().Name)
 
