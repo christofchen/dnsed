@@ -30,6 +30,7 @@ func (i *flagStringList) Set(value string) error {
 
 var (
 	verbose = flag.Bool("verbose", false, "verbose output")
+	debug   = flag.Bool("debug", false, "debug output")
 	address = flag.String("address", ":53", "Address to listen to (TCP and UDP)")
 
 	uplink = flag.String("uplink", "", "host:port of uplink to send the queries")
@@ -40,6 +41,9 @@ var (
 
 	namefile = flag.String("namefile", "", "zonefile with named 'NAME TTL IN A IP' names to replace")
 	namemap  map[string][]dns.RR
+
+	masqfile = flag.String("masqfile", "", "plain list of fqdn to replace NS with, sets AA")
+	masqlist []string
 )
 
 func check(err error, msg string) {
@@ -55,8 +59,17 @@ func init() {
 
 func main() {
 	flag.Parse()
-	fmt.Println("dnsed V1.2 - christof@chen.de")
-	fmt.Println("rewrite DNS responses based on name/ip mappings")
+	fmt.Println("dnsed V1.3 - christof@chen.de")
+	fmt.Println("rewrite DNS responses")
+	fmt.Println("features: ipmatch namematch masquerade")
+
+	if *uplink == "" {
+		log.Printf("no valid uplink IP:PORT\n")
+		return
+	} else {
+		log.Printf("uplink %+v\n", *uplink)
+	}
+
 	// Read the translation list IP -> IP
 
 	if *ipfile != "" {
@@ -120,6 +133,36 @@ func main() {
 
 		file.Close()
 	}
+
+	// read masq file...
+
+	if *masqfile != "" {
+
+		file, err := os.Open(*masqfile)
+		check(err, "can't read masqfile:")
+
+		scanner := bufio.NewScanner(file)
+		scanner.Split(bufio.ScanLines)
+
+		nn := 0
+		for scanner.Scan() {
+			words := strings.Fields(scanner.Text())
+			if len(words) > 0 {
+				if words[0][0] == '#' || words[0][0] == ';' {
+					continue
+				}
+
+				//log.Printf("add masq as %+v\n", words[0])
+				masqlist = append(masqlist, words[0])
+				nn++
+			}
+		}
+		log.Printf("read %+v masq NS from %+v: %+v\n", nn, *masqfile, masqlist)
+		file.Close()
+	}
+
+	// start server
+
 	udpServer := &dns.Server{Addr: *address, Net: "udp"}
 	tcpServer := &dns.Server{Addr: *address, Net: "tcp"}
 
@@ -156,6 +199,9 @@ func validHostPort(s string) bool {
 }
 
 func myhandler(w dns.ResponseWriter, req *dns.Msg) {
+	if *debug {
+		fmt.Printf("DEBUG question:\n%+v\n", req)
+	}
 	if len(req.Question) == 0 {
 		dns.HandleFailed(w, req)
 		return
@@ -176,6 +222,10 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	if err != nil {
 		dns.HandleFailed(w, req)
 		return
+	}
+
+	if *debug {
+		fmt.Printf("DEBUG response received:\n%+v\n", resp)
 	}
 
 	// rewrite based on the IP
@@ -240,6 +290,77 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	if doreplace {
 		resp.Answer = newanswer
 		//log.Printf("debug doreplace  %+v\n", resp.Answer)
+	}
+
+	// rewrite the NS in the answer section
+	// TODO: stuff the masqueraded NS IPs into the additional section
+	if len(masqlist) > 0 {
+
+		var newanswer []dns.RR
+		var rrr dns.RR
+		skipover := make(map[string]int)
+		doreplace := false
+		for _, rr := range resp.Answer {
+			if _, ok := rr.(*dns.NS); ok {
+				name := string(rr.Header().Name)
+
+				if _, ok := skipover[name]; !ok {
+					// only if NOT processed this "label NS" already
+					if *verbose {
+						log.Printf("masq answer rewrite %+v to %+v\n", name, masqlist)
+					}
+					for _, rns := range masqlist {
+						rrr, err = dns.NewRR(name + " 60 IN NS " + rns)
+						newanswer = append(newanswer, rrr)
+						doreplace = true
+						skipover[name] = 1
+					}
+				}
+			} else {
+				newanswer = append(newanswer, rr)
+			}
+
+		}
+		if doreplace {
+			resp.Answer = newanswer
+			//log.Printf("debug doreplace  %+v\n", resp.Answer)
+		}
+
+		// UGLY. replace the authority section as well
+		var newns []dns.RR
+		skipover = make(map[string]int)
+		doreplace = false
+		for _, rr := range resp.Ns {
+			if _, ok := rr.(*dns.NS); ok {
+				name := string(rr.Header().Name)
+
+				if _, ok := skipover[name]; !ok {
+					// only if NOT processed this "label NS" already
+					if *verbose {
+						log.Printf("masq authority rewrite %+v to %+v\n", name, masqlist)
+					}
+					for _, rns := range masqlist {
+						rrr, err = dns.NewRR(name + " 60 IN NS " + rns)
+						newns = append(newns, rrr)
+						doreplace = true
+						skipover[name] = 1
+					}
+				}
+			} else {
+				newns = append(newns, rr)
+			}
+
+		}
+		if doreplace {
+			resp.Ns = newns
+			//log.Printf("debug doreplace  %+v\n", resp.Answer)
+		}
+
+		resp.MsgHdr.Authoritative = true // AA
+	}
+
+	if *debug {
+		fmt.Printf("DEBUG processed response:\n%+v\n", resp)
 	}
 
 	w.WriteMsg(resp)
