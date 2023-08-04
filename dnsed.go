@@ -119,7 +119,7 @@ func main() {
 
 		for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 			//if _, ok := rr.(*dns.A); ok {
-			label := string(rr.Header().Name)
+			label := strings.ToLower((rr.Header().Name))
 			namemap[label] = append(namemap[label], rr)
 			nn++
 			//}
@@ -266,7 +266,7 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	for _, rr := range resp.Answer {
 		// rewrite A records only :-)
 		if _, ok := rr.(*dns.A); ok {
-			name := string(rr.Header().Name)
+			name := strings.ToLower(string(rr.Header().Name))
 
 			if _, ok := skipover[name]; !ok {
 				// only if NOT processed this "label A" already
