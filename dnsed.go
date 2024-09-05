@@ -17,16 +17,16 @@ import (
 	"github.com/miekg/dns"
 )
 
-type flagStringList []string
+//type flagStringList []string
 
-func (i *flagStringList) String() string {
-	return fmt.Sprint(*i)
-}
+//func (i *flagStringList) String() string {
+//	return fmt.Sprint(*i)
+//}
 
-func (i *flagStringList) Set(value string) error {
-	*i = append(*i, value)
-	return nil
-}
+//func (i *flagStringList) Set(value string) error {
+//	*i = append(*i, value)
+//	return nil
+//}
 
 var (
 	verbose = flag.Bool("verbose", false, "verbose output")
@@ -44,6 +44,7 @@ var (
 
 	masqfile = flag.String("masqfile", "", "plain list of fqdn to replace NS with, sets AA")
 	masqlist []string
+	//	masqmap  map[string]dns.RR
 )
 
 func check(err error, msg string) {
@@ -59,7 +60,7 @@ func init() {
 
 func main() {
 	flag.Parse()
-	fmt.Println("dnsed V1.3 - christof@chen.de")
+	fmt.Println("dnsed V1.4 - christof@chen.de")
 	fmt.Println("rewrite DNS responses")
 	fmt.Println("features: ipmatch namematch masquerade")
 
@@ -115,7 +116,7 @@ func main() {
 		namemap = make(map[string][]dns.RR)
 		nn := 0
 
-		zp := dns.NewZoneParser(file, "", "")
+		zp := dns.NewZoneParser(file, ".", "")
 
 		for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 			//if _, ok := rr.(*dns.A); ok {
@@ -190,14 +191,15 @@ func main() {
 	tcpServer.Shutdown()
 }
 
-func validHostPort(s string) bool {
-	host, port, err := net.SplitHostPort(s)
-	if err != nil || host == "" || port == "" {
-		return false
+/*
+	 func validHostPort(s string) bool {
+		host, port, err := net.SplitHostPort(s)
+		if err != nil || host == "" || port == "" {
+			return false
+		}
+		return true
 	}
-	return true
-}
-
+*/
 func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	if *debug {
 		fmt.Printf("DEBUG question:\n%+v\n", req)
@@ -215,6 +217,39 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	transport := "udp"
 	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
 		transport = "tcp"
+	}
+
+	// check if the query matches an entry in the namemap
+	// if so, copy the relevant answer from the namemap to the response
+	// if not, forward the query to the uplink
+
+	rr := req.Question[0]
+	name := strings.ToLower(string(rr.Name))
+	rrtype := dns.TypeToString[rr.Qtype]
+	replaced := false
+	if _, ok := namemap[name]; ok {
+		// rewrite the answer
+		//log.Printf("DEBUG name spoof %+v to %+v\n", rr, namemap[name])
+		resp := new(dns.Msg)
+		// copy only CNAME or the matching record types to the answer
+		for _, rrr := range namemap[name] {
+			rrrtype := dns.TypeToString[rrr.Header().Rrtype]
+			if rrrtype == "CNAME" || rrtype == rrrtype {
+				resp.Answer = append(resp.Answer, rrr)
+				replaced = true
+			}
+		}
+		if replaced {
+			resp.SetReply(req)
+			resp.Authoritative = false
+			w.WriteMsg(resp)
+			log.Printf("name based rewrite: %+v to %+v\n", name, namemap[name])
+			return
+		} else {
+			if *verbose {
+				log.Printf("name match, no QType match %+v, continue upstream\n", rr)
+			}
+		}
 	}
 
 	c := &dns.Client{Net: transport}
@@ -236,8 +271,7 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 		if _, ok := rr.(*dns.A); ok {
 			// Rewrite the IP in the Answer section
 			ip := string(rr.(*dns.A).A.String())
-			var octets []string
-			octets = strings.Split(ip, ".")
+			octets := strings.Split(ip, ".")
 			//fmt.Printf("DEBUG check IP %+v \n", octets)
 			for ii := 3; ii > -1; ii-- {
 				//fmt.Printf("DEBUG ipmapToCheck[%+v] %+v \n", ii, ipmapToCheck[ii])
@@ -246,7 +280,11 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 					//fmt.Printf("DEBUG check IP match %+v in run %+v as %+v\n", ip, ii, checkip)
 					replace = ipmap[ii][checkip]
 					if replace != "" {
-						replace = replace + "." + strings.Join(octets[ii+1:4], ".")
+						suffix := strings.Join(octets[ii+1:4], ".")
+						//log.Printf("DEBUG replace position %+v match: %+v  suffix: %+v\n", ii, replace, suffix)
+						if suffix != "" {
+							replace = replace + "." + strings.Join(octets[ii+1:4], ".")
+						}
 						log.Printf("IP based rewrite %+v to %+v\n", rr, replace)
 						rr.(*dns.A).A = net.ParseIP(replace)
 						break
@@ -264,6 +302,11 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 
 	doreplace := false
 	for _, rr := range resp.Answer {
+
+		if *debug {
+			fmt.Printf("DEBUG name rewrite inspect answer: %+v\n", rr)
+		}
+
 		// rewrite A records only :-)
 		if _, ok := rr.(*dns.A); ok {
 			name := strings.ToLower(string(rr.Header().Name))
@@ -274,7 +317,7 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 
 				for _, rrr := range replacerr {
 					if _, ok := rrr.(*dns.A); ok {
-						log.Printf("name based rewrite %+v to %+v\n", rr, rrr)
+						log.Printf("name based rewrite of upstream %+v to %+v\n", rr, rrr)
 						newanswer = append(newanswer, rrr)
 						doreplace = true
 						skipover[name] = 1
@@ -289,7 +332,9 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	}
 	if doreplace {
 		resp.Answer = newanswer
-		//log.Printf("debug doreplace  %+v\n", resp.Answer)
+		if *debug {
+			log.Printf("DEBUG doreplace  %+v\n", resp.Answer)
+		}
 	}
 
 	// rewrite the NS in the answer section
@@ -297,12 +342,15 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	if len(masqlist) > 0 {
 
 		var newanswer []dns.RR
+		var newadditional []dns.RR
 		var rrr dns.RR
 		skipover := make(map[string]int)
 		doreplace := false
 		for _, rr := range resp.Answer {
 			if _, ok := rr.(*dns.NS); ok {
-				name := string(rr.Header().Name)
+				name := strings.ToLower(string(rr.Header().Name))
+
+				// TODO: check if the name falls into one of the masqed zones
 
 				if _, ok := skipover[name]; !ok {
 					// only if NOT processed this "label NS" already
@@ -310,11 +358,26 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 						log.Printf("masq answer rewrite %+v to %+v\n", name, masqlist)
 					}
 					for _, rns := range masqlist {
-						rrr, err = dns.NewRR(name + " 60 IN NS " + rns)
+						rrr, _ := dns.NewRR(name + " 60 IN NS " + rns)
 						newanswer = append(newanswer, rrr)
 						doreplace = true
 						skipover[name] = 1
+						// stuff the MASQ NS IP into the additional section:
+						//log.Printf("DEBUG dump namemap: %+v\n", namemap)
+						replacerr := namemap[rns]
+						//log.Printf("DEBUG masq additional append %+v to %+v\n", rns, replacerr)
+						for _, rrr := range replacerr {
+							if _, ok := rrr.(*dns.A); ok {
+								log.Printf("stuff additional %+v to %+v\n", rns, rrr)
+								newadditional = append(newadditional, rrr)
+							}
+							if _, ok := rrr.(*dns.AAAA); ok {
+								log.Printf("stuff additional %+v to %+v\n", rns, rrr)
+								newadditional = append(newadditional, rrr)
+							}
+						}
 					}
+
 				}
 			} else {
 				newanswer = append(newanswer, rr)
@@ -323,6 +386,7 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 		}
 		if doreplace {
 			resp.Answer = newanswer
+			resp.Extra = newadditional
 			//log.Printf("debug doreplace  %+v\n", resp.Answer)
 		}
 
@@ -340,7 +404,7 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 						log.Printf("masq authority rewrite %+v to %+v\n", name, masqlist)
 					}
 					for _, rns := range masqlist {
-						rrr, err = dns.NewRR(name + " 60 IN NS " + rns)
+						rrr, _ = dns.NewRR(name + " 60 IN NS " + rns)
 						newns = append(newns, rrr)
 						doreplace = true
 						skipover[name] = 1
@@ -360,7 +424,7 @@ func myhandler(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	if *debug {
-		fmt.Printf("DEBUG processed response:\n%+v\n", resp)
+		log.Printf("DEBUG processed response:\n%+v\n", resp)
 	}
 
 	w.WriteMsg(resp)
